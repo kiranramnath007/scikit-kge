@@ -13,7 +13,7 @@ _DEF_LEARNING_RATE = 0.1
 _DEF_SAMPLE_FUN = None
 _DEF_MAX_EPOCHS = 1000
 _DEF_MARGIN = 1.0
-
+_DEF_SAMPLE_NEGATIVES = False
 
 class Config(object):
 
@@ -102,6 +102,7 @@ class StochasticTrainer(object):
 
         self.post_epoch = kwargs.pop('post_epoch', _DEF_POST_EPOCH)
         self.samplef = kwargs.pop('samplef', _DEF_SAMPLE_FUN)
+        self.sample_negatives = kwargs.pop("sample_negatives", _DEF_SAMPLE_NEGATIVES)
         pu = kwargs.pop('param_update', AdaGrad)
         self._updaters = {
             key: pu(param, self.learning_rate)
@@ -119,17 +120,16 @@ class StochasticTrainer(object):
         setattr(self, param_id, value)
         self.hyperparams[param_id] = value
 
-    def fit(self, xs, ys):
-        self._optim(list(zip(xs, ys)))
+    def fit(self, xs, ys, n_e):
+        self._optim(list(zip(xs, ys)), n_e)
 
     def _pre_epoch(self):
         self.loss = 0
 
-    def _optim(self, xys):
+    def _optim(self, xys, n_e):
         idx = np.arange(len(xys))
-        self.batch_size = np.ceil(len(xys) / self.nbatches)
+        self.batch_size = int(np.ceil(len(xys) / self.nbatches))
         batch_idx = np.arange(self.batch_size, len(xys), self.batch_size)
-
         for self.epoch in range(1, self.max_epochs + 1):
             # shuffle training examples
             self._pre_epoch()
@@ -149,13 +149,16 @@ class StochasticTrainer(object):
                 if not f(self):
                     break
 
-    def _process_batch(self, xys):
+    def _process_batch(self, xys, n_e):
         # if enabled, sample additional examples
         if self.samplef is not None:
             xys += self.samplef(xys)
 
         if hasattr(self.model, '_prepare_batch_step'):
             self.model._prepare_batch_step(xys)
+        
+        if self.sample_negatives:
+            xys_corr = self._sample_negatives(xys, n_e)
 
         # take step for batch
         grads = self.model._gradients(xys)
@@ -165,6 +168,38 @@ class StochasticTrainer(object):
     def _batch_step(self, grads):
         for paramID in self._updaters.keys():
             self._updaters[paramID](*grads[paramID])
+    
+    def _sample_negatives(xys, n_e):
+        """
+        Perform negative sampling by corrupting head or tail of each triplets in
+        dataset.
+
+        Params:
+        -------
+        xys: int matrix of M x 4, where M is the (mini)batch size
+            First column contains index of head entities.
+            Second column contains index of relationships.
+            Third column contains index of tail entities.
+
+        n_e: int
+            Number of entities in dataset.
+
+        Returns:
+        --------
+        X_corr: int matrix of M x 3, where M is the (mini)batch size
+            Similar to input param xys, but at each column, either first or third col
+            is subtituted with random entity.
+        """
+        M = xys.shape[0]
+
+        corr = np.random.randint(n_e, size=M)
+        e_idxs = np.random.choice([0, 2], size=M)
+
+        xys_corr = np.copy(xys)
+        xys_corr[np.arange(M), e_idxs] = corr
+        xys_corr[:,3] = 0
+
+        return xys_corr
 
 
 class PairwiseStochasticTrainer(StochasticTrainer):
